@@ -126,6 +126,7 @@ namespace vo::create {
         auto pickPhysicalDevice = [](const vk::raii::PhysicalDevice& physicalDevice) {
             auto features = physicalDevice.getFeatures();
             features.fillModeNonSolid = vk::True;
+            features.samplerAnisotropy = vk::True;
             auto properties = physicalDevice.getProperties();
             return features.geometryShader && properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
             };
@@ -308,7 +309,10 @@ namespace vo::create {
             {},
             vk::PrimitiveTopology::eLineStrip
         );
-
+        vk::PipelineTessellationStateCreateInfo tesselationInfo(
+            {},
+            10
+        );
         auto bindingDescription = Vertex::getBindingDescription();
         auto attributeDescription = Vertex::getAttributeDescription();
 
@@ -329,13 +333,13 @@ namespace vo::create {
             {},
             {},
             {},
-            3.0f
+            2.0f
         );
 
         vk::PipelineMultisampleStateCreateInfo multisampleInfo(
             {},
             vk::SampleCountFlagBits::e1,
-            vk::False
+            vk::True
         );
 
         vk::Viewport viewport(
@@ -379,7 +383,7 @@ namespace vo::create {
 
         vk::GraphicsPipelineCreateInfo gpCreateInfo(
             {}, 2, shaderInfos.data(), &vertexInput,
-            &assemblyInfo, {},
+            &assemblyInfo, &tesselationInfo,
             &viewportInfo,
             &rasterizationInfo, &multisampleInfo,
             nullptr, &colorBlendInfo,

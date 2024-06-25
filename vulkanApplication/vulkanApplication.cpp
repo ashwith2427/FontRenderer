@@ -8,6 +8,13 @@
 #include <fstream>
 #include "pipeline.hpp"
 #include <span>
+#include <unordered_map>
+#include <stack>
+
+std::ostream& operator<<(std::ostream& os, glm::vec2 a) {
+    os << std::format("x: {}\ty: {}\n", a.x, a.y);
+    return os;
+}
 
 std::vector<const char*> instanceExtensions = {
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
@@ -22,6 +29,19 @@ std::vector<const char*> instanceLayers = {
 std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
+
+struct Vec2Hash {
+    size_t operator()(const glm::vec2& v) const {
+        size_t h1 = std::hash<float>{}(v.x);
+        size_t h2 = std::hash<float>{}(v.y);
+        return h1 ^ (h2 << 1); // Combine the hashes
+    }
+};
+
+bool operator==(const glm::vec2& lhs, const glm::vec2& rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
 
 static void normalize(std::vector<glm::vec2>& points) {
 	auto xCompare = [](const glm::vec2& a, const glm::vec2& b) {
@@ -46,29 +66,117 @@ std::string gotoPath(const std::string& path) {
 	return FontPath + path;
 }
 
+glm::vec2 linear(glm::vec2 p1, glm::vec2 p2,float t) {
+    return p1 + t * (p2 - p1);
+}
+
+glm::vec2 bezier(glm::vec2 p1,glm::vec2 p2,glm::vec2 p3,float t) {
+    glm::vec2 lerp1 = linear(p1,p2,t);
+    glm::vec2 lerp2 = linear(p2, p3, t);
+    return linear(lerp1,lerp2,t);
+}
+
+glm::vec2 interpolated_point(glm::vec2 p1,glm::vec2 p2) {
+    return { (p1.x + p2.x) / 2,(p1.y + p2.y) / 2 };
+}
+
+
+bool isOnCurve(char tag) {
+    return FT_CURVE_TAG(tag) == FT_CURVE_TAG_ON;
+}
+
+
+
+void add_bezier_curve(glm::vec2 point1,glm::vec2 point2,glm::vec2 point3,std::vector<glm::vec2>& points) {
+     for (float t = 0.0f; t < 1.0f; t += 0.1f) {
+         points.push_back(bezier(point1, point2, point3, t));
+     }
+}
+
+static std::pair<std::vector<glm::vec2>,std::vector<char>> interpolated_points(
+    std::vector<glm::vec2> points,
+    char* ftags
+) {
+    std::vector<glm::vec2> interp_points;
+    std::vector<char> new_tags;
+    for (int i = 0; i < points.size(); i++) {
+        if (isOnCurve(ftags[i])) {
+            interp_points.push_back(points[i]);
+            new_tags.push_back(ftags[i]);
+        }
+        else {
+            interp_points.push_back(points[i]);
+            new_tags.push_back(ftags[i]);
+            if (!isOnCurve(ftags[(i + 1) % points.size()])) {
+                interp_points.push_back(interpolated_point(points[i], points[(i + 1) % points.size()]));
+                new_tags.push_back(FT_CURVE_TAG_ON);
+            }
+        }
+    }
+    return { interp_points,new_tags };
+}
+
+auto add_curves(std::vector<glm::vec2> points,char* ftags,std::vector<glm::vec2> contours) 
+->std::pair<std::vector<glm::vec2>,std::vector<int>>
+{
+    std::vector<int> new_contours;
+    std::vector<glm::vec2> new_points;
+    auto [interp_points, new_tags] = interpolated_points(points, ftags);
+
+    glm::vec2 startpoint = interp_points[0];
+    new_points.push_back(startpoint);
+    for (int i = 1, idx = 0; i < interp_points.size(); i++) {
+        if (new_tags[i] == FT_CURVE_TAG_ON) {
+            new_points.push_back(interp_points[i]);
+            if (contours[idx] == interp_points[i]) {
+                new_contours.push_back(new_points.size() - 1);
+                if (i + 1 < interp_points.size()) startpoint = interp_points[i + 1];
+                idx++;
+            }
+        }
+        else {
+            if (contours[idx] == interp_points[i]) {
+                add_bezier_curve(interp_points[i - 1], interp_points[i], startpoint, new_points);
+                new_contours.push_back(new_points.size() - 1);
+                if (i + 1 < interp_points.size()) startpoint = interp_points[i + 1];
+                idx++;
+            }
+            else add_bezier_curve(interp_points[i - 1], interp_points[i], interp_points[(i + 1) % interp_points.size()], new_points);
+        }
+    }
+    return { new_points,new_contours };
+}
+
+
 auto loadFont(std::string fontPath) -> std::pair<std::vector<glm::vec2>, std::vector<int>> {
     FT_Library library;
     FT_Face face;
     FT_Error error;
-
     error = FT_Init_FreeType(&library);
     error = FT_New_Face(library, "C:\\Users\\ashwi\\Downloads\\Roboto\\Roboto-Regular.ttf", 0, &face);
-    FT_Load_Char(face, 'X', FT_LOAD_DEFAULT);
+    FT_Load_Char(face, 'C', FT_LOAD_DEFAULT);
     FT_GlyphSlot slot = face->glyph;
     FT_Outline outline = slot->outline;
     int numPoints = outline.n_points;
     FT_Vector* fpoints = outline.points;
     int numContours = outline.n_contours;
     short* fcontours = outline.contours;
+    char* ftags=outline.tags;
+    int idx = 0;
+    int count = 0;
+    std::vector<glm::vec2> contours;
     std::vector<glm::vec2> points;
     for (int i = 0; i < numPoints; i++) {
         points.push_back({ fpoints[i].x,fpoints[i].y });
     }
-    std::vector<int> contours;
     for (int i = 0; i < numContours; i++) {
-        contours.push_back(fcontours[i]);
+        contours.push_back(points[fcontours[i]]);
     }
-    return { points,contours };
+
+    auto [new_points, new_contours] = add_curves(points,ftags,contours);
+
+    
+    return { new_points,new_contours };
 }
 
 
@@ -124,12 +232,13 @@ int main() {
     std::vector<vk::raii::DeviceMemory> mems;
     std::vector<vk::raii::Buffer> buffers;
     std::vector<int> counts;
-
-    std::cout << points.size();
-    for (int i = 0; i < endpoints.size(); i++) {
-        std::cout << endpoints[i] << std::endl;
-    }
     normalize(points);
+    /*for (int i = 0; i < points.size(); i++) {
+        std::cout << std::format("x: {}\ty:{}\n",points[i].x,points[i].y);
+    }*/
+    //for (int i = 0; i < endpoints.size(); i++) {
+    //    std::cout << endpoints[i] << "   ";
+    //}
     int startpoint = 0;
     for (int ep = 0; ep < endpoints.size();ep++) {
         int contourIndex = endpoints[ep] - startpoint + 1;
